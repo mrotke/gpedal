@@ -5,8 +5,7 @@ let ble_sint16 = ['getInt16', 2, true];
 let ble_uint8 = ['getUint8', 1];
 let ble_uint16 = ['getUint16', 2, true];
 let ble_uint32 = ['getUint32', 4, true];
-// TODO: paired 12bit uint handling
-let ble_uint24 = ['getUint8', 3];
+let ble_uint24 = [(dataview, offset) => dataview.getUint16(offset, true) + (dataview.getUint8(offset + 2) << 16), 3];
 
 // https://www.bluetooth.com/specifications/gatt/viewer?attributeXmlFile=org.bluetooth.characteristic.cycling_power_measurement.xml
 let cycling_power_measurement = [
@@ -31,6 +30,77 @@ let csc_measurement = [
   [1, [ [ble_uint32, 'cumulative_wheel_revolutions'], [ble_uint16, 'last_wheel_event_time'] ]],
   [2, [ [ble_uint16, 'cumulative_crank_revolutions'], [ble_uint16, 'last_crank_event_time'] ]]
 ];
+
+// Fitness Machine Service (FTMS) data characteristics
+// https://www.bluetooth.com/specifications/specs/fitness-machine-service-1-0/
+//
+// Bit 0 of every FTMS data flags field is "More Data" and is inverted: when it is 0
+// the first field (speed / stroke rate) IS present.  Machines that can't fit every
+// field in one notification split them over several packets, setting "More Data" on
+// all but the last.  An optional third element on a field is its resolution.
+let ftms_expended_energy = [ [ble_uint16, 'total_energy'], [ble_uint16, 'energy_per_hour'], [ble_uint8, 'energy_per_minute'] ];
+
+// org.bluetooth.characteristic.indoor_bike_data (0x2AD2)
+let indoor_bike_data = [
+  [1, [ [ble_uint16, 'instantaneous_speed', 0.01] ]],
+  [2, [ [ble_uint16, 'average_speed', 0.01] ]],
+  [4, [ [ble_uint16, 'instantaneous_cadence', 0.5] ]],
+  [8, [ [ble_uint16, 'average_cadence', 0.5] ]],
+  [16, [ [ble_uint24, 'total_distance'] ]],
+  [32, [ [ble_sint16, 'resistance_level'] ]],
+  [64, [ [ble_sint16, 'instantaneous_power'] ]],
+  [128, [ [ble_sint16, 'average_power'] ]],
+  [256, ftms_expended_energy],
+  [512, [ [ble_uint8, 'heart_rate'] ]],
+  [1024, [ [ble_uint8, 'metabolic_equivalent', 0.1] ]],
+  [2048, [ [ble_uint16, 'elapsed_time'] ]],
+  [4096, [ [ble_uint16, 'remaining_time'] ]]
+];
+
+// org.bluetooth.characteristic.cross_trainer_data (0x2ACE)
+let cross_trainer_data = [
+  [1, [ [ble_uint16, 'instantaneous_speed', 0.01] ]],
+  [2, [ [ble_uint16, 'average_speed', 0.01] ]],
+  [4, [ [ble_uint24, 'total_distance'] ]],
+  [8, [ [ble_uint16, 'step_rate'], [ble_uint16, 'average_step_rate'] ]],
+  [16, [ [ble_uint16, 'stride_count', 0.1] ]],
+  [32, [ [ble_uint16, 'positive_elevation_gain'], [ble_uint16, 'negative_elevation_gain'] ]],
+  [64, [ [ble_sint16, 'inclination', 0.1], [ble_sint16, 'ramp_angle', 0.1] ]],
+  [128, [ [ble_sint16, 'resistance_level'] ]],
+  [256, [ [ble_sint16, 'instantaneous_power'] ]],
+  [512, [ [ble_sint16, 'average_power'] ]],
+  [1024, ftms_expended_energy],
+  [2048, [ [ble_uint8, 'heart_rate'] ]],
+  [4096, [ [ble_uint8, 'metabolic_equivalent', 0.1] ]],
+  [8192, [ [ble_uint16, 'elapsed_time'] ]],
+  [16384, [ [ble_uint16, 'remaining_time'] ]],
+  [32768, [ /* Movement Direction */ ]]
+];
+
+// org.bluetooth.characteristic.rower_data (0x2AD1)
+let rower_data = [
+  [1, [ [ble_uint8, 'stroke_rate', 0.5], [ble_uint16, 'stroke_count'] ]],
+  [2, [ [ble_uint8, 'average_stroke_rate', 0.5] ]],
+  [4, [ [ble_uint24, 'total_distance'] ]],
+  [8, [ [ble_uint16, 'instantaneous_pace'] ]],
+  [16, [ [ble_uint16, 'average_pace'] ]],
+  [32, [ [ble_sint16, 'instantaneous_power'] ]],
+  [64, [ [ble_sint16, 'average_power'] ]],
+  [128, [ [ble_sint16, 'resistance_level'] ]],
+  [256, ftms_expended_energy],
+  [512, [ [ble_uint8, 'heart_rate'] ]],
+  [1024, [ [ble_uint8, 'metabolic_equivalent', 0.1] ]],
+  [2048, [ [ble_uint16, 'elapsed_time'] ]],
+  [4096, [ [ble_uint16, 'remaining_time'] ]]
+];
+
+// org.bluetooth.characteristic.fitness_machine_feature (0x2ACC) - Fitness Machine Features field
+export const ftms_features = {
+  cadence: 1 << 1,
+  step_count: 1 << 6,
+  heart_rate: 1 << 10,
+  power: 1 << 14
+};
 
 let ant_manufacturers = {
   1: 'garmin',
@@ -184,10 +254,22 @@ let ant_manufacturers = {
 };
 
 class BleCharacteristicParser {
+  constructor () {
+    // Flags whose fields are present when the bit is 0 rather than 1
+    this.inverted_flags = 0;
+  }
+
   getData(dataview) {
+    if(dataview.byteLength < this.mask_size / 8) {
+      return {};
+    }
+
     let offset = 0;
     let mask;
-    if(this.mask_size === 16) {
+    if(this.mask_size === 24) {
+      mask = dataview.getUint16(0, true) + (dataview.getUint8(2) << 16);
+      offset += 3;
+    } else if(this.mask_size === 16) {
       mask = dataview.getUint16(0, true);
       offset += 2;
     } else {
@@ -205,7 +287,11 @@ class BleCharacteristicParser {
     }
 
     for(let [flag, fieldDescriptions] of this.fields) {
-      if(mask & flag) {
+      let present = (mask & flag) !== 0;
+      if(this.inverted_flags & flag) {
+        present = !present;
+      }
+      if(present) {
         for(let fdesc of fieldDescriptions) {
           fieldArrangement.push(fdesc);
         }
@@ -214,12 +300,24 @@ class BleCharacteristicParser {
 
     let data = {};
     for(let field of fieldArrangement) {
-      var [[accessor, fieldSize, endianness], fieldName] = field;
+      var [[accessor, fieldSize, endianness], fieldName, resolution] = field;
+
+      // Ignore fields a (non conforming) device truncated
+      if(offset + fieldSize > dataview.byteLength) {
+        break;
+      }
+
       let value;
-      if(endianness) {
+      if(typeof accessor === 'function') {
+        value = accessor(dataview, offset);
+      } else if(endianness) {
         value = dataview[accessor](offset, endianness);
       } else {
         value = dataview[accessor](offset);
+      }
+
+      if(resolution !== undefined) {
+        value = value * resolution;
       }
 
       data[fieldName] = value;
@@ -245,6 +343,22 @@ export class CyclingPowerMeasurementParser extends BleCharacteristicParser {
     this.mask_size = 16;
   }
 }
+
+class FTMSDataParser extends BleCharacteristicParser {
+  constructor (fields, mask_size=16) {
+    super();
+    this.fields = fields;
+    this.mask_size = mask_size;
+    this.inverted_flags = 1; // "More Data"
+  }
+}
+
+// Supported FTMS machine data characteristics, in order of preference
+export const ftms_machine_types = [
+  {characteristicId: 0x2AD2, name: 'Indoor Bike', createParser: () => new FTMSDataParser(indoor_bike_data)},
+  {characteristicId: 0x2ACE, name: 'Cross Trainer', createParser: () => new FTMSDataParser(cross_trainer_data, 24)},
+  {characteristicId: 0x2AD1, name: 'Rower', createParser: () => new FTMSDataParser(rower_data)}
+];
 
 export class Meter {
   constructor () {
@@ -312,9 +426,21 @@ export class BleMeter extends Meter {
 
   async gattserverdisconnected(e) {
     console.log('Reconnecting');
-    this.server = await this.device.gatt.connect();
-    this.service = await this.server.getPrimaryService(this.serviceId);
-    this.characteristic = await this.service.getCharacteristic(this.characteristicId);
+    // DIY sensors (e.g. ESP32 based) often reboot or drop out briefly, so retry with backoff
+    for(let attempt = 1; ; attempt++) {
+      try {
+        this.server = await this.device.gatt.connect();
+        this.service = await this.server.getPrimaryService(this.serviceId);
+        this.characteristic = await this.service.getCharacteristic(this.characteristicId);
+        break;
+      } catch(error) {
+        if(attempt >= 10) {
+          throw error;
+        }
+        console.log('Reconnect attempt ' + attempt + ' failed: ', error);
+        await timeout(Math.min(1000 * attempt, 5000));
+      }
+    }
     if(this.listening) {
       this.listening = false;
       this.listen();
@@ -511,6 +637,64 @@ export class BleHRMeter extends BleMeter {
         let hr = event.target.value.getUint8(1);
         this.dispatch('hr', hr);
         this.clearValueOnTimeout('hr');
+      });
+      this.characteristic.startNotifications();
+      this.listening = true;
+    }
+  }
+
+}
+
+//
+//  Generic Fitness Machine Service (FTMS) meter.  Works with smart trainers, smart bikes and
+//  DIY sensors such as https://github.com/Rafaday/ESP32-FTMS-Bike that expose Indoor Bike
+//  Data (or Cross Trainer / Rower Data) notifications.  A single device may provide power,
+//  cadence and heart rate.
+//
+export class BleFTMSMeter extends BleMeter {
+  constructor (device, server, service, characteristic, machineType) {
+    super(device, server, service, characteristic);
+
+    this.serviceId = 0x1826;
+    this.characteristicId = machineType.characteristicId;
+    this.parser = machineType.createParser();
+
+    // Distinct from device.id so a trainer that also exposes the Cycling Power service
+    // shows up as two selectable meters
+    this.id = device.id + '-ftms';
+    this.name = (device.name || machineType.name) + ' (FTMS)';
+  }
+
+  listen() {
+    if(!this.listening) {
+      this.characteristic.addEventListener('characteristicvaluechanged', event => {
+        let data = this.parser.getData(event.target.value);
+
+        if(data['instantaneous_power'] !== undefined) {
+          this.dispatch('power', Math.max(0, data['instantaneous_power']));
+        }
+
+        let cadence = data['instantaneous_cadence'];
+        if(cadence === undefined) {
+          cadence = data['step_rate'];
+        }
+        if(cadence === undefined) {
+          cadence = data['stroke_rate'];
+        }
+        if(cadence !== undefined) {
+          this.dispatch('cadence', cadence);
+        }
+
+        // 0 means no heart rate source is attached to the machine
+        if(data['heart_rate']) {
+          this.dispatch('hr', data['heart_rate']);
+        }
+
+        if(data['instantaneous_speed'] !== undefined) {
+          this.dispatch('speed', data['instantaneous_speed']);
+        }
+
+        this.clearValueOnTimeout(['power', 'cadence', 'hr', 'speed']);
       });
       this.characteristic.startNotifications();
       this.listening = true;

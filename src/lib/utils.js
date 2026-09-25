@@ -17,20 +17,38 @@ export function fileRead(file) {
   });
 }
 
-export function readCharacteristicValue(characteristic) {
+// Resolves with the first notified value, or undefined if none arrives within `ms`
+export function readCharacteristicValue(characteristic, ms=5000) {
   return new Promise(function(resolve,reject) {
     let executed = false;
-    let listener = event => {
-      characteristic.removeEventListener('characteristicvaluechanged', listener);
-      characteristic.stopNotifications();
+    let finish = value => {
       if(!executed) {
         executed = true;
-        resolve(event.target.value);
+        characteristic.removeEventListener('characteristicvaluechanged', listener);
+        characteristic.stopNotifications().catch(() => {});
+        resolve(value);
       }
-    }
+    };
+    let listener = event => finish(event.target.value);
+    setTimeout(() => finish(undefined), ms);
 
     characteristic.addEventListener('characteristicvaluechanged', listener);
-    characteristic.startNotifications();
+    characteristic.startNotifications().catch(reject);
+  });
+}
+
+// Calls onValue for every value notified during the next `ms` milliseconds
+export function sampleCharacteristicValues(characteristic, ms, onValue) {
+  return new Promise(function(resolve,reject) {
+    let listener = event => onValue(event.target.value);
+    setTimeout(() => {
+      characteristic.removeEventListener('characteristicvaluechanged', listener);
+      characteristic.stopNotifications().catch(() => {});
+      resolve();
+    }, ms);
+
+    characteristic.addEventListener('characteristicvaluechanged', listener);
+    characteristic.startNotifications().catch(reject);
   });
 }
 

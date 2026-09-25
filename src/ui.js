@@ -1,15 +1,52 @@
 import {GPedalDisplay} from './GPedalDisplay';
 import {GPXRoutePointFactory} from './Route';
-import {fileRead, readCharacteristicValue, hasStravaOauthTokens,
-    getStravaOauthTokens, setStravaOauthTokens,
+import {fileRead, readCharacteristicValue, sampleCharacteristicValues,
+    hasStravaOauthTokens, getStravaOauthTokens, setStravaOauthTokens,
     removeStravaOauthTokens} from './lib/utils';
 import {credentials} from "./lib/oauth";
 import {VirtualPowerMeter, BlePowerCadenceMeter, BleCadenceMeter,
-    BlePowerMeter, BleHRMeter, CyclingPowerMeasurementParser, AntMeterLocator,
-    CycleopsMagnetoPowerCurve, BHBladeZBikeMeter} from './Meter';
+    BlePowerMeter, BleHRMeter, BleFTMSMeter, CyclingPowerMeasurementParser, AntMeterLocator,
+    CycleopsMagnetoPowerCurve, BHBladeZBikeMeter, ftms_machine_types, ftms_features} from './Meter';
 import {managedLocalStorage} from './lib/managedLocalStorage';
 import URLSearchParams from '@ungap/url-search-params';
 import fscreen from 'fscreen';
+
+/**
+Work out which of power / cadence / heart rate an FTMS machine provides, using the optional
+Fitness Machine Feature characteristic and a short sample of live data.
+*/
+async function detectFTMSCapabilities(service, characteristic, parser) {
+  let caps = {power: false, cadence: false, hr: false};
+
+  try {
+    let feature = await service.getCharacteristic(0x2ACC);
+    let features = (await feature.readValue()).getUint32(0, true);
+    caps.power = (features & ftms_features.power) !== 0;
+    caps.cadence = (features & (ftms_features.cadence | ftms_features.step_count)) !== 0;
+    caps.hr = (features & ftms_features.heart_rate) !== 0;
+  } catch(error) {}
+
+  let sampled = false;
+  try {
+    await sampleCharacteristicValues(characteristic, 2000, value => {
+      let data = parser.getData(value);
+      sampled = true;
+      caps.power = caps.power || ('instantaneous_power' in data);
+      caps.cadence = caps.cadence || ('instantaneous_cadence' in data) || ('step_rate' in data) || ('stroke_rate' in data);
+      caps.hr = caps.hr || !!data['heart_rate'];
+    });
+  } catch(error) {
+    console.log("FTMS sampling error: ", error);
+  }
+
+  // Some machines stay silent until a workout starts, assume the common case
+  if(!sampled && !caps.power && !caps.cadence) {
+    caps.power = true;
+    caps.cadence = true;
+  }
+
+  return caps;
+}
 
 
 export async function registerUI() {
@@ -293,11 +330,50 @@ export async function registerUI() {
           // https://www.bluetooth.com/specifications/gatt/viewer?attributeXmlFile=org.bluetooth.service.cycling_power.xml
           {services: [0x1818]},
           // https://www.bluetooth.com/specifications/gatt/viewer?attributeXmlFile=org.bluetooth.service.cycling_speed_and_cadence.xml
-          {services: [0x1816]}]
+          {services: [0x1816]},
+          // https://www.bluetooth.com/specifications/specs/fitness-machine-service-1-0/
+          {services: [0x1826]}],
+        optionalServices: [0x180D, 0x1818, 0x1816, 0x1826]
       });
       let server = await device.gatt.connect();
 
       let meter = undefined;
+
+      // org.bluetooth.service.fitness_machine
+      let ftmsId = device.id + '-ftms';
+      if(![...powerMeters, ...cadenceMeters, ...heartMeters].find(m => m[0] === ftmsId)) {
+        let service = undefined;
+        try {
+          service = await server.getPrimaryService(0x1826);
+        } catch(error) {}
+
+        if(service) {
+          for(let machineType of ftms_machine_types) {
+            let characteristic = undefined;
+            try {
+              characteristic = await service.getCharacteristic(machineType.characteristicId);
+            } catch(error) {}
+
+            if(characteristic) {
+              let caps = await detectFTMSCapabilities(service, characteristic, machineType.createParser());
+              if(caps.power || caps.cadence || caps.hr) {
+                meter = new BleFTMSMeter(device, server, service, characteristic, machineType);
+                if(caps.power) {
+                  powerMeters.push([meter.id, meter]);
+                }
+                if(caps.cadence) {
+                  cadenceMeters.push([meter.id, meter]);
+                }
+                if(caps.hr) {
+                  heartMeters.push([meter.id, meter]);
+                }
+              }
+              break;
+            }
+          }
+        }
+      }
+
       // org.bluetooth.service.cycling_power
       if(!powerMeters.find(m => m[0] === device.id)) {
         let service = undefined;
@@ -309,7 +385,7 @@ export async function registerUI() {
           let characteristic = await service.getCharacteristic(0x2A63);
           let parser = new CyclingPowerMeasurementParser();
           let value = await readCharacteristicValue(characteristic);
-          let data = parser.getData(value);
+          let data = value ? parser.getData(value) : {};
 
           // is Crank Revolution Data Present ?
           if('cumulative_crank_revolutions' in data) {
