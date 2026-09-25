@@ -1,0 +1,67 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      # Optional repository secrets STRAVA_CLIENT_ID / STRAVA_CLIENT_SECRET enable Strava upload.
+      # Note they end up in the public bundle.js, as with any build of GPedal.
+      - name: Create src/lib/oauth.js
+        env:
+          STRAVA_CLIENT_ID: ${{ secrets.STRAVA_CLIENT_ID }}
+          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
+        run: |
+          if [ -n "$STRAVA_CLIENT_ID" ]; then
+            cat > src/lib/oauth.js <<EOF
+          export const credentials = {
+            STRAVA_CLIENT_ID: '$STRAVA_CLIENT_ID',
+            STRAVA_CLIENT_SECRET: '$STRAVA_CLIENT_SECRET',
+            STRAVA_ACCESS_TOKEN: undefined,
+          };
+          EOF
+          else
+            cp src/lib/oauth.sample.js src/lib/oauth.js
+          fi
+
+      - run: npm ci
+
+      - run: npm run build
+        env:
+          NODE_OPTIONS: --openssl-legacy-provider
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

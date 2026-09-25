@@ -29,12 +29,40 @@ suffixed with "(FTMS)".
 
 ANT+ sensors are supported through [ANT-WS](https://github.com/chadj/ant-ws) and BH Fitness BladeZ bikes through Web Serial.
 
-## Building
+## Building and running
 
-```
-cp src/lib/oauth.sample.js src/lib/oauth.js
-npm install
-npm run build
-```
+Requires [Node.js](https://nodejs.org/).
 
-webpack 4 needs `NODE_OPTIONS=--openssl-legacy-provider` on Node.js 17 or newer.
+1. Create the Strava credentials file (leave the values `undefined` to hide Strava upload):
+
+   ```
+   cp src/lib/oauth.sample.js src/lib/oauth.js
+   ```
+
+2. Install dependencies:
+
+   ```
+   npm install
+   ```
+
+3. Build the production bundle into `dist/bundle.js`:
+
+   ```
+   NODE_OPTIONS=--openssl-legacy-provider npm run build
+   ```
+
+   webpack 4 needs `--openssl-legacy-provider` on Node.js 17 or newer.  In PowerShell run
+   `$env:NODE_OPTIONS="--openssl-legacy-provider"` first, then `npm run build`.
+
+4. Run it.  Either start the development server, which serves `dist/` and rebuilds on every change:
+
+   ```
+   NODE_OPTIONS=--openssl-legacy-provider npm start
+   ```
+
+   and open [https://localhost:8443/](https://localhost:8443/) (accept the self signed certificate warning),
+   or host the built `dist/` folder on any HTTPS web server.
+
+Web Bluetooth only works in Chrome or Edge on a secure origin (HTTPS or `localhost`).  The Google Maps
+API key in `dist/index.html` may be restricted to the original site - if Street View does not load,
+replace it with your own key.
