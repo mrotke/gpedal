@@ -65,4 +65,7 @@ Requires [Node.js](https://nodejs.org/).
 
 Web Bluetooth only works in Chrome or Edge on a secure origin (HTTPS or `localhost`).  The Google Maps
 API key in `dist/index.html` may be restricted to the original site - if Street View does not load,
-replace it with your own key.
+replace it with your own key.  The key needs the Maps JavaScript API (maps and Street View) and the
+Geocoding API.  The Elevation API is only used for GPX files that contain no `<ele>` elevations, so a
+Google Maps Demo Key (which does not include Elevation) works with normal GPX exports; if the Elevation
+service is unavailable such a route is ridden flat.

@@ -75,6 +75,71 @@ export class GPXRoutePointFactory {
     }
   }
 
+  /**
+  Resample the GPX points to evenly spaced points (like the Elevation service's
+  getElevationAlongPath does) using the elevations stored in the file.  Missing
+  elevations are interpolated from neighbouring points.
+  */
+  expandPointsWithGPXElevation(gpxPoints, desiredDistanceBetween=20) {
+    let spherical = google.maps.geometry.spherical;
+
+    // Cumulative distance along the track, dropping zero length segments
+    let track = [];
+    let total = 0;
+    for(let p of gpxPoints) {
+      if(track.length > 0) {
+        let d = spherical.computeDistanceBetween(track[track.length-1].point.location, p.location);
+        if(d === 0) {
+          continue;
+        }
+        total += d;
+      }
+      track.push({point: p, at: total});
+    }
+
+    let known = track.filter(t => t.point.elevation !== undefined);
+    if(known.length === 0) {
+      known = [{point: {elevation: 0}, at: 0}];
+    }
+    let k = 0;
+    for(let t of track) {
+      if(t.point.elevation === undefined) {
+        while(k < known.length - 1 && known[k+1].at < t.at) {
+          k++;
+        }
+        let a = known[k], b = known[Math.min(k+1, known.length-1)];
+        if(t.at <= a.at || a === b) {
+          t.point.elevation = a.point.elevation;
+        } else if(t.at >= b.at) {
+          t.point.elevation = b.point.elevation;
+        } else {
+          t.point.elevation = a.point.elevation + (b.point.elevation - a.point.elevation) * (t.at - a.at) / (b.at - a.at);
+        }
+      }
+    }
+
+    if(track.length < 2) {
+      this.points = track.map(t => new RoutePoint({elevation: t.point.elevation, location: t.point.location}));
+      return;
+    }
+
+    let samples = Math.max(1, Math.ceil(total / desiredDistanceBetween));
+    let step = total / samples;
+    let seg = 0;
+    for(let i=0; i<=samples; i++) {
+      let at = (i === samples) ? total : i * step;
+      while(seg < track.length - 2 && track[seg+1].at < at) {
+        seg++;
+      }
+      let a = track[seg], b = track[seg+1];
+      let fraction = Math.min(1, Math.max(0, (at - a.at) / (b.at - a.at)));
+      this.points.push(new RoutePoint({
+        elevation: a.point.elevation + (b.point.elevation - a.point.elevation) * fraction,
+        location: spherical.interpolate(a.point.location, b.point.location, fraction)
+      }));
+    }
+  }
+
   async expandPointsWithElevation(gpxPoints) {
     let start=0;
     let desiredDistanceBetween = 20;
@@ -130,14 +195,40 @@ export class GPXRoutePointFactory {
     } else {
       let gpxParser = new DOMParser();
       let gpxDom = gpxParser.parseFromString(this.fileBody, "text/xml");
-      let gpxPoints = Array.from(gpxDom.documentElement.getElementsByTagName('trkpt')).map(p => {
+      let gpxNodes = Array.from(gpxDom.documentElement.getElementsByTagName('trkpt'));
+      if(gpxNodes.length === 0) {
+        // Route (planned course) files use <rte><rtept> instead of tracks
+        gpxNodes = Array.from(gpxDom.documentElement.getElementsByTagName('rtept'));
+      }
+      let gpxPoints = gpxNodes.map(p => {
         let lat = parseFloat(p.getAttribute('lat')),
             lng = parseFloat(p.getAttribute('lon'));
 
-        return new RoutePoint({location: {lat, lng}});
+        let elevation = undefined;
+        let $ele = p.getElementsByTagName('ele')[0];
+        if($ele) {
+          elevation = parseFloat($ele.textContent);
+          if(!isFinite(elevation)) {
+            elevation = undefined;
+          }
+        }
+
+        return new RoutePoint({elevation, location: {lat, lng}});
       });
 
-      await this.expandPointsWithElevation(gpxPoints);
+      if(gpxPoints.some(p => p.elevation !== undefined)) {
+        this.expandPointsWithGPXElevation(gpxPoints);
+      } else {
+        try {
+          await this.expandPointsWithElevation(gpxPoints);
+        } catch(error) {
+          // e.g. the Google Maps API key can't use the Elevation service
+          console.warn('Elevation service failed, the route will be flat: ', error);
+          gpxPoints.forEach(p => p.elevation = 0);
+          this.points = [];
+          this.expandPointsWithGPXElevation(gpxPoints);
+        }
+      }
       this.expandPointsWithGradeAndHeading();
 
       managedLocalStorage.add('gpx-cache', cacheName, this.points);
